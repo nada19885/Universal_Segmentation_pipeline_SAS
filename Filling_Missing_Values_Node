@@ -1,0 +1,186 @@
+# ======================================================
+# 📦 IMPORTS
+# ======================================================
+import pandas as pd
+import numpy as np
+from scipy import stats
+import os
+from sklearn.feature_selection import mutual_info_classif
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.experimental import enable_iterative_imputer  # required for IterativeImputer
+from sklearn.impute import IterativeImputer
+
+# ======================================================
+# 📥 INPUT: Read data from previous node
+# ======================================================
+if 'dm_inputdf' in locals():
+    orig = dm_inputdf.copy()
+    print(f"✅ Loaded data from previous node with shape: {orig.shape}")
+else:
+    print("⚠️ dm_inputdf not found. Using fallback file (for standalone testing).")
+    fallback_path = os.path.join(dm_nodedir, 'node_data.csv')
+    if os.path.exists(fallback_path):
+        orig = pd.read_csv(fallback_path)
+        print(f"Loaded fallback data from {fallback_path}, shape={orig.shape}")
+    else:
+        raise NameError("❌ No input data found. Run this node after a predecessor or provide a fallback file.")
+
+# Make a working copy
+orig_filtered = orig.copy()
+
+# ======================================================
+# ⚗️ LITTLE’S MCAR TEST FUNCTION
+# ======================================================
+def littles_mcar_test(df: pd.DataFrame):
+    df_num = df.select_dtypes(include=np.number).dropna(how="all")
+    if df_num.empty:
+        return np.nan, 0, np.nan
+
+    patterns = df_num.isnull().astype(int)
+    pattern_groups = patterns.groupby(list(df_num.columns)).size().reset_index().rename(columns={0: "count"})
+    chi2 = 0.0
+    dfree = 0
+    complete_cases = df_num.dropna()
+    if complete_cases.empty:
+        return np.nan, 0, np.nan
+
+    mu_hat = complete_cases.mean().values
+    sigma_hat = np.cov(complete_cases.T, bias=True)
+
+    for _, row in pattern_groups.iterrows():
+        mask = (patterns == row[:-1].values).all(axis=1)
+        group = df_num[mask]
+        obs_vars = group.columns[row[:-1].values == 0]
+        if len(obs_vars) == 0 or group[obs_vars].empty:
+            continue
+        group_mean = group[obs_vars].mean().values
+        obs_idx = [df_num.columns.get_loc(c) for c in obs_vars]
+        mu_obs = mu_hat[obs_idx]
+        sigma_obs = sigma_hat[np.ix_(obs_idx, obs_idx)]
+        try:
+            sigma_obs_inv = np.linalg.pinv(sigma_obs)
+        except np.linalg.LinAlgError:
+            continue
+        diff = group_mean - mu_obs
+        chi2 += row["count"] * float(diff.T @ sigma_obs_inv @ diff)
+        dfree += len(obs_vars)
+
+    p_value = 1 - stats.chi2.cdf(chi2, dfree) if dfree > 0 else np.nan
+    return chi2, dfree, p_value
+
+# ======================================================
+# 📊 STEP 1: MISSING VALUE STATS
+# ======================================================
+stats_rows = []
+for col in orig_filtered.columns:
+    nmiss = orig_filtered[col].isna().sum()
+    if nmiss > 0:
+        stats_rows.append({
+            "Variable": col,
+            "Total_Obs": len(orig_filtered),
+            "MissingPct": (nmiss / len(orig_filtered)) * 100,
+            "nmiss": nmiss
+        })
+
+df_stage1 = pd.DataFrame(stats_rows)
+results = []
+
+# ======================================================
+# ⚙️ STEP 2: HANDLE MISSING VALUES
+# ======================================================
+if not df_stage1.empty:
+    for col in df_stage1["Variable"]:
+        miss_pct = float(df_stage1.loc[df_stage1["Variable"] == col, "MissingPct"].iloc[0])
+        is_cat = orig_filtered[col].dtype == "object"
+        reason = ""
+        recommended_fill = ""
+
+        # --- Small missing percentage: simple fill ---
+        if miss_pct < 1.0:
+            if is_cat:
+                orig_filtered[col].fillna("Missing", inplace=True)
+                recommended_fill = "'Missing'"
+            else:
+                orig_filtered[col].fillna(orig_filtered[col].median(), inplace=True)
+                recommended_fill = "Median"
+            reason = f"Missing % ({miss_pct:.2f}%) is low, simple fill used."
+
+        # --- Larger missing percentage: predictive or fallback fill ---
+        else:
+            if is_cat:
+                tmp = orig_filtered.copy()
+                tmp[col].fillna("Missing", inplace=True)
+                try:
+                    X = tmp.drop(columns=[col])
+                    y = tmp[col].factorize()[0]
+                    X_num = X.select_dtypes(include=np.number)
+                    if not X_num.empty:
+                        if len(tmp) < 1000:
+                            mi = mutual_info_classif(X_num, y, random_state=42)
+                            mechanism = "MAR" if (mi > 0).any() else "MCAR"
+                        else:
+                            rf = RandomForestClassifier(n_estimators=100, random_state=42)
+                            rf.fit(X_num, y)
+                            mechanism = "MAR" if (rf.feature_importances_ > 0).any() else "MCAR"
+                        reason = f"Higher missing %, predictive mechanism test suggests ({mechanism})."
+                    else:
+                        reason = "No numeric predictors available for MAR test."
+                except Exception as e:
+                    reason = f"Exception during predictive test: {str(e)}"
+                orig_filtered[col].fillna("Missing", inplace=True)
+                recommended_fill = "'Missing'"
+
+            else:
+                num_cols = orig_filtered.select_dtypes(include=np.number).columns
+                if len(num_cols) > 0:
+                    try:
+                        imp = IterativeImputer(estimator=RandomForestRegressor(random_state=42), random_state=42)
+                        orig_filtered[num_cols] = imp.fit_transform(orig_filtered[num_cols])
+                        reason = "Higher missing %, predictive imputation (Iterative Imputer) used."
+                        recommended_fill = "Predictive Imputer"
+                    except Exception as e:
+                        orig_filtered[col].fillna(orig_filtered[col].median(), inplace=True)
+                        reason = f"Imputer failed, fallback to median. Error: {str(e)}"
+                        recommended_fill = "Median (fallback)"
+                else:
+                    reason = "No numeric columns available for imputation."
+                    recommended_fill = "None"
+
+        results.append({
+            "Variable": col,
+            "Total_Obs": len(orig_filtered),
+            "MissingPct": miss_pct,
+            "nmiss": int(df_stage1.loc[df_stage1["Variable"] == col, "nmiss"].iloc[0]),
+            "RecommendedFill": recommended_fill,
+            "Reason": reason
+        })
+
+df_stage2 = pd.DataFrame(results)
+
+# ======================================================
+# 🌍 STEP 3: GLOBAL LITTLE'S MCAR TEST
+# ======================================================
+chi2, dfree, pval = littles_mcar_test(orig_filtered)
+global_test = pd.DataFrame([{
+    "Variable": "GLOBAL_TEST",
+    "Total_Obs": len(orig_filtered),
+    "MissingPct": np.nan,
+    "nmiss": int(orig_filtered.isna().sum().sum()),
+    "RecommendedFill": "N/A",
+    "Reason": f"Global MCAR test: chi2={chi2:.2f}, df={dfree}, p={pval:.4f}"
+}])
+
+# Combine results
+dm_output = pd.concat([df_stage2, global_test], ignore_index=True)
+
+# ======================================================
+# ✅ FINAL OUTPUT
+# ======================================================
+print("\n🧮 VARIABLE-LEVEL SUMMARY:\n", df_stage2)
+print("\n🌍 GLOBAL LITTLE'S MCAR TEST:\n", global_test)
+print("\n✅ REPORT OUTPUT:\n", dm_output)
+print("\n📊 Remaining missing values after imputation:\n", orig_filtered.isna().sum())
+
+# Pass the cleaned DataFrame to the next node
+dm_scoreddf = orig_filtered.copy()
+print(f"\n✅ Assigned final data to dm_outputdf (shape={dm_scoreddf.shape})")
