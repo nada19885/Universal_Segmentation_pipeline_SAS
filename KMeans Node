@@ -1,0 +1,370 @@
+import pandas as pd
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
+
+# --- 1. Read input data (from PCA node) ---
+data = dm_inputdf.copy()
+
+# --- 2. Identify PCA score columns ---
+pc_cols = [col for col in data.columns 
+           if col.startswith("PC_") and np.issubdtype(data[col].dtype, np.number)]
+
+if not pc_cols:
+    raise ValueError("Error: No Principal Component scores (PC_X) found in input data.")
+
+X_pca_scores = data[pc_cols]
+print(f"✅ Found {len(pc_cols)} Principal Component scores for clustering.")
+
+# --- 3. AUTOMATIC K SELECTION ---
+print("\n" + "="*80)
+print("AUTOMATIC K SELECTION PROCESS")
+print("="*80)
+
+# Define range of K values to test
+K_MIN = 2
+K_MAX = min(10, len(X_pca_scores) - 1)  # Don't exceed data size
+k_range = range(K_MIN, K_MAX + 1)
+
+print(f"🔍 Testing K values from {K_MIN} to {K_MAX}...")
+
+# Store evaluation metrics
+results = {
+    'k': [],
+    'silhouette': [],
+    'calinski_harabasz': [],
+    'davies_bouldin': [],
+    'inertia': [],
+    'models': []
+}
+
+# Test different K values
+for k in k_range:
+    print(f"   Testing K={k}...", end=' ')
+    
+    # Run K-means
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto')
+    labels = kmeans.fit_predict(X_pca_scores)
+    
+    # Calculate metrics
+    silhouette = silhouette_score(X_pca_scores, labels)
+    calinski = calinski_harabasz_score(X_pca_scores, labels)
+    davies_bouldin = davies_bouldin_score(X_pca_scores, labels)
+    
+    # Store results
+    results['k'].append(k)
+    results['silhouette'].append(silhouette)
+    results['calinski_harabasz'].append(calinski)
+    results['davies_bouldin'].append(davies_bouldin)
+    results['inertia'].append(kmeans.inertia_)
+    results['models'].append(kmeans)
+    
+    print(f"Silhouette: {silhouette:.3f}")
+
+# --- 4. FIND OPTIMAL K ---
+print("\n" + "="*80)
+print("OPTIMAL K SELECTION RESULTS")
+print("="*80)
+
+# Convert results to DataFrame for easier analysis
+results_df = pd.DataFrame(results)
+
+# Method 1: Silhouette Score (Primary criterion)
+best_k_silhouette = results_df.loc[results_df['silhouette'].idxmax(), 'k']
+best_silhouette = results_df['silhouette'].max()
+
+# Method 2: Elbow method (using inertia)
+inertia_diff = np.diff(results_df['inertia'])
+if len(inertia_diff) > 1:
+    inertia_diff_ratio = inertia_diff[:-1] / inertia_diff[1:]
+    if len(inertia_diff_ratio) > 0:
+        best_k_elbow = results_df.loc[inertia_diff_ratio.argmax() + 1, 'k']
+    else:
+        best_k_elbow = best_k_silhouette
+else:
+    best_k_elbow = best_k_silhouette
+
+# Method 3: Calinski-Harabasz (higher is better)
+best_k_ch = results_df.loc[results_df['calinski_harabasz'].idxmax(), 'k']
+
+# Method 4: Davies-Bouldin (lower is better)
+best_k_db = results_df.loc[results_df['davies_bouldin'].idxmin(), 'k']
+
+# Final decision: Prioritize silhouette score, with validation from other metrics
+final_k = best_k_silhouette
+
+# Check for consensus
+k_scores = [best_k_silhouette, best_k_elbow, best_k_ch, best_k_db]
+if len(set(k_scores)) == 1:  # All methods agree
+    print("🎯 All selection methods agree on optimal K!")
+else:
+    print("⚠️ Selection methods suggest different K values, using Silhouette-based selection")
+
+print(f"\n📊 Optimal K Selection:")
+print(f"   • Silhouette Method: K = {best_k_silhouette} (score: {best_silhouette:.3f})")
+print(f"   • Elbow Method: K = {best_k_elbow}")
+print(f"   • Calinski-Harabasz: K = {best_k_ch}")
+print(f"   • Davies-Bouldin: K = {best_k_db}")
+print(f"   • FINAL SELECTION: K = {final_k}")
+
+# --- 5. VISUALIZE K SELECTION ---
+plt.figure(figsize=(15, 10))
+
+# Subplot 1: Silhouette Scores
+plt.subplot(2, 3, 1)
+plt.plot(results_df['k'], results_df['silhouette'], 'bo-', linewidth=2, markersize=8)
+plt.axvline(x=final_k, color='red', linestyle='--', alpha=0.7, label=f'Optimal K={final_k}')
+plt.xlabel('Number of Clusters (K)')
+plt.ylabel('Silhouette Score')
+plt.title('Silhouette Score vs K\n(Higher is Better)')
+plt.grid(True, alpha=0.3)
+plt.legend()
+
+# Subplot 2: Elbow Method
+plt.subplot(2, 3, 2)
+plt.plot(results_df['k'], results_df['inertia'], 'go-', linewidth=2, markersize=8)
+plt.axvline(x=final_k, color='red', linestyle='--', alpha=0.7, label=f'Optimal K={final_k}')
+plt.xlabel('Number of Clusters (K)')
+plt.ylabel('Within-Cluster Sum of Squares')
+plt.title('Elbow Method\n(Look for "elbow")')
+plt.grid(True, alpha=0.3)
+plt.legend()
+
+# Subplot 3: Calinski-Harabasz
+plt.subplot(2, 3, 3)
+plt.plot(results_df['k'], results_df['calinski_harabasz'], 'mo-', linewidth=2, markersize=8)
+plt.axvline(x=final_k, color='red', linestyle='--', alpha=0.7, label=f'Optimal K={final_k}')
+plt.xlabel('Number of Clusters (K)')
+plt.ylabel('Calinski-Harabasz Score')
+plt.title('Calinski-Harabasz Score\n(Higher is Better)')
+plt.grid(True, alpha=0.3)
+plt.legend()
+
+# Subplot 4: Davies-Bouldin
+plt.subplot(2, 3, 4)
+plt.plot(results_df['k'], results_df['davies_bouldin'], 'co-', linewidth=2, markersize=8)
+plt.axvline(x=final_k, color='red', linestyle='--', alpha=0.7, label=f'Optimal K={final_k}')
+plt.xlabel('Number of Clusters (K)')
+plt.ylabel('Davies-Bouldin Score')
+plt.title('Davies-Bouldin Score\n(Lower is Better)')
+plt.grid(True, alpha=0.3)
+plt.legend()
+
+# Subplot 5: Comparative Scores (Normalized)
+plt.subplot(2, 3, 5)
+# Normalize all scores to 0-1 for comparison
+silhouette_norm = (results_df['silhouette'] - results_df['silhouette'].min()) / (results_df['silhouette'].max() - results_df['silhouette'].min())
+calinski_norm = (results_df['calinski_harabasz'] - results_df['calinski_harabasz'].min()) / (results_df['calinski_harabasz'].max() - results_df['calinski_harabasz'].min())
+davies_norm = 1 - ((results_df['davies_bouldin'] - results_df['davies_bouldin'].min()) / (results_df['davies_bouldin'].max() - results_df['davies_bouldin'].min()))
+
+plt.plot(results_df['k'], silhouette_norm, 'bo-', linewidth=2, markersize=6, label='Silhouette')
+plt.plot(results_df['k'], calinski_norm, 'mo-', linewidth=2, markersize=6, label='Calinski-Harabasz')
+plt.plot(results_df['k'], davies_norm, 'co-', linewidth=2, markersize=6, label='Davies-Bouldin')
+plt.axvline(x=final_k, color='red', linestyle='--', alpha=0.7, label=f'Optimal K={final_k}')
+plt.xlabel('Number of Clusters (K)')
+plt.ylabel('Normalized Scores')
+plt.title('Comparative Metrics (Normalized)')
+plt.grid(True, alpha=0.3)
+plt.legend()
+
+# Subplot 6: Final clustering with optimal K
+plt.subplot(2, 3, 6)
+optimal_model = results['models'][final_k - K_MIN]  # Get the model for optimal K
+optimal_labels = optimal_model.labels_
+
+scatter = plt.scatter(X_pca_scores.iloc[:, 0], X_pca_scores.iloc[:, 1], 
+                     c=optimal_labels, cmap='viridis', alpha=0.6, s=30)
+plt.colorbar(scatter, label='Cluster')
+plt.xlabel('PC_1')
+plt.ylabel('PC_2')
+plt.title(f'Final Clustering (K={final_k})')
+
+plt.tight_layout()
+plt.show()
+
+# --- 6. RUN FINAL CLUSTERING WITH OPTIMAL K ---
+print(f"\n🔮 Running final K-Means clustering with optimal K = {final_k}...")
+
+# Use the pre-trained optimal model
+kmeans = optimal_model
+
+# --- FIX: Define cluster_col before using it ---
+cluster_col = "_CLUSTER_"
+data[cluster_col] = kmeans.labels_
+
+# --- 7. CLUSTER QUALITY ASSESSMENT ---
+print("\n" + "="*80)
+print("FINAL CLUSTER QUALITY METRICS")
+print("="*80)
+
+# Calculate final quality metrics
+silhouette_avg = silhouette_score(X_pca_scores, data[cluster_col])
+calinski_avg = calinski_harabasz_score(X_pca_scores, data[cluster_col])
+davies_avg = davies_bouldin_score(X_pca_scores, data[cluster_col])
+
+print(f"📈 Silhouette Score: {silhouette_avg:.3f}")
+print(f"📊 Calinski-Harabasz Score: {calinski_avg:.1f}")
+print(f"📉 Davies-Bouldin Score: {davies_avg:.3f}")
+
+# Interpretation guide
+if silhouette_avg > 0.7:
+    quality_msg = "✅ Strong cluster structure"
+elif silhouette_avg > 0.5:
+    quality_msg = "✅ Reasonable cluster structure" 
+elif silhouette_avg > 0.25:
+    quality_msg = "⚠️ Weak cluster structure"
+else:
+    quality_msg = "❌ No substantial cluster structure"
+
+print(f"🎯 Quality Assessment: {quality_msg}")
+
+# --- 8. CLUSTER PROFILING & INTERPRETATION ---
+print("\n" + "="*80)
+print("CLUSTER PROFILES IN ORIGINAL FEATURE SPACE")
+print("="*80)
+
+# Get original numeric features (excluding PCA components and system columns)
+original_features = [col for col in data.columns 
+                    if not col.startswith('PC_') 
+                    and col not in ['_CLUSTER_', 'CustomerID', '_PartInd_']
+                    and np.issubdtype(data[col].dtype, np.number)]
+
+def analyze_cluster_profiles(data, cluster_col, features):
+    """Create comprehensive cluster profiles"""
+    
+    cluster_means = data.groupby(cluster_col)[features].mean()
+    overall_means = data[features].mean()
+    cluster_sizes = data[cluster_col].value_counts().sort_index()
+    
+    cluster_profiles = {}
+    
+    for cluster in sorted(data[cluster_col].unique()):
+        cluster_size = cluster_sizes[cluster]
+        print(f"\n📊 **Cluster {cluster}** (Size: {cluster_size}, {cluster_size/len(data):.1%})")
+        print("-" * 60)
+        
+        # Find features where this cluster differs most from overall average
+        differences = (cluster_means.loc[cluster] - overall_means)
+        
+        # Get top features higher and lower than average
+        top_higher = differences.nlargest(5)
+        top_lower = differences.nsmallest(5)
+        
+        print("📈 Higher than average:")
+        higher_features = []
+        for feature, diff in top_higher.items():
+            if abs(diff) > overall_means[feature] * 0.1:  # Meaningful difference (>10%)
+                pct_diff = (diff / overall_means[feature]) * 100
+                print(f"   ✅ {feature}: {cluster_means.loc[cluster, feature]:.2f} vs {overall_means[feature]:.2f} ({pct_diff:+.1f}%)")
+                higher_features.append((feature, pct_diff))
+        
+        print("📉 Lower than average:")
+        lower_features = []
+        for feature, diff in top_lower.items():
+            if abs(diff) < -overall_means[feature] * 0.1:  # Meaningful difference (>10%)
+                pct_diff = (diff / overall_means[feature]) * 100
+                print(f"   ❌ {feature}: {cluster_means.loc[cluster, feature]:.2f} vs {overall_means[feature]:.2f} ({pct_diff:+.1f}%)")
+                lower_features.append((feature, pct_diff))
+        
+        cluster_profiles[cluster] = {
+            'higher_features': higher_features,
+            'lower_features': lower_features,
+            'size': cluster_size
+        }
+    
+    return cluster_profiles
+
+cluster_profiles = analyze_cluster_profiles(data, cluster_col, original_features)
+
+# --- 9. BUSINESS-FRIENDLY CLUSTER NAMES ---
+print("\n" + "="*80)
+print("BUSINESS CLUSTER INTERPRETATIONS")
+print("="*80)
+
+# Generate automatic cluster names based on profiles
+def generate_cluster_names(cluster_profiles):
+    """Generate descriptive names based on cluster characteristics"""
+    cluster_names = {}
+    
+    for cluster, profile in cluster_profiles.items():
+        higher_terms = []
+        lower_terms = []
+        
+        # Analyze top higher features for naming
+        for feature, pct_diff in profile['higher_features'][:2]:  # Top 2 features
+            if pct_diff > 20:
+                higher_terms.append(feature)
+        
+        # Analyze top lower features for naming  
+        for feature, pct_diff in profile['lower_features'][:2]:  # Top 2 features
+            if pct_diff < -20:
+                lower_terms.append(feature)
+        
+        # Build descriptive name
+        if higher_terms and not lower_terms:
+            name = f"High-{', '.join(higher_terms)}"
+        elif lower_terms and not higher_terms:
+            name = f"Low-{', '.join(lower_terms)}"
+        elif higher_terms and lower_terms:
+            name = f"High-{higher_terms[0]}/Low-{lower_terms[0]}"
+        else:
+            name = f"Average-Performers"
+            
+        cluster_names[cluster] = name
+    
+    return cluster_names
+
+cluster_descriptions = generate_cluster_names(cluster_profiles)
+
+# Add cluster descriptions to data
+data['CLUSTER_DESCRIPTION'] = data[cluster_col].map(cluster_descriptions)
+
+print("🎯 Generated Cluster Names:")
+for cluster_num, description in cluster_descriptions.items():
+    count = sum(data[cluster_col] == cluster_num)
+    print(f"   Cluster {cluster_num}: {description} (n={count})")
+
+# --- 10. FINAL OUTPUT PREPARATION ---
+print("\n" + "="*80)
+print("FINAL OUTPUT SUMMARY")
+print("="*80)
+
+# Update metadata for cluster columns
+dm_meta_add = pd.DataFrame({
+    "Name": [cluster_col, 'CLUSTER_DESCRIPTION'],
+    "Role": ["SEGMENT", "SEGMENT"],
+    "Level": ["NOMINAL", "NOMINAL"]
+})
+
+# Return outputs
+dm_outputdf = data.copy()
+dm_scoreddf = data.copy()
+dm_add_meta = dm_meta_add.copy()
+
+# Store K selection results for reporting
+dm_k_selection_results = {
+    'optimal_k': final_k,
+    'all_results': results_df,
+    'quality_metrics': {
+        'silhouette': silhouette_avg,
+        'calinski_harabasz': calinski_avg,
+        'davies_bouldin': davies_avg
+    }
+}
+
+# Final summary
+print(f"✅ AUTOMATIC CLUSTERING COMPLETE!")
+print(f"🎯 Optimal clusters selected: K = {final_k}")
+print(f"📈 Silhouette score: {silhouette_avg:.3f} ({quality_msg})")
+print(f"📊 Cluster distribution:")
+for cluster in sorted(data[cluster_col].unique()):
+    count = sum(data[cluster_col] == cluster)
+    percentage = count / len(data) * 100
+    print(f"   - Cluster {cluster} ({cluster_descriptions[cluster]}): {count} customers ({percentage:.1f}%)")
+
+print(f"\n📋 K selection process tested {len(k_range)} values: {list(k_range)}")
+print(f"🎯 Business-ready cluster descriptions added as 'CLUSTER_DESCRIPTION'")
+print(f"💡 All K evaluation results stored for reference")
