@@ -1,0 +1,19 @@
+# ---------- Drop High-Cardinality Columns Node ----------
+# INPUT: dm_inputdf is already a DataFrame
+data = dm_inputdf.copy()
+
+# ---------- Identify High-Cardinality Columns ----------
+# Threshold can be adjusted depending on dataset size
+high_cardinality_threshold = 0.9  # e.g., >90% unique values
+
+n_rows = len(data)
+identifier_cols = [col for col in data.columns 
+                   if data[col].nunique(dropna=True) / n_rows > high_cardinality_threshold]
+
+# ---------- Drop Columns ----------
+processed_data = data.drop(columns=identifier_cols)
+print(f"Dropped high-cardinality columns (likely IDs): {identifier_cols}")
+print(f"Remaining columns: {list(processed_data.columns)}")
+
+# ---------- OUTPUT: Assign the result back to dm_outputdf ----------
+dm_scoreddf = processed_data.copy()
